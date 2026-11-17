@@ -15,7 +15,11 @@ REASONS: dict[str, dict[str, str]] = {
     "E_DECODE": {"label": "编码无法识别", "level": "error"},
     "E_SAMPLE_UNKNOWN": {"label": "样例不存在", "level": "error"},
     "E_CONTRACT_INVALID": {"label": "表计契约无效", "level": "error"},
+    "E_ALIAS_INVALID": {"label": "表计身份登记无效", "level": "error"},
     "E_BATCH_NOT_FOUND": {"label": "批次不存在", "level": "error"},
+    "E_PUBLISH_NOT_READY": {"label": "批次未完成不能发布", "level": "error"},
+    "E_PUBLISH_UNBALANCED": {"label": "四账不平不能发布", "level": "error"},
+    "E_PUBLISH_NOT_FOUND": {"label": "发布版本不存在", "level": "error"},
     "Q_COLUMN_COUNT": {"label": "列数与表头不一致", "level": "error"},
     "Q_TRUNCATED_ROW": {"label": "末行被截断", "level": "error"},
     "Q_MISSING_READING": {"label": "读数为空值哨兵", "level": "error"},
@@ -30,6 +34,7 @@ REASONS: dict[str, dict[str, str]] = {
     "Q_REVERSE_READING": {"label": "读数倒走", "level": "error"},
     "Q_DUPLICATE_CONFLICT": {"label": "同键读数不一致", "level": "error"},
     "Q_METER_RETIRED": {"label": "抄表晚于换表时点", "level": "warn"},
+    "Q_IDENTITY_PENDING": {"label": "表号待补登记依据", "level": "warn"},
     "K_ROLLOVER": {"label": "满量翻转已还原", "level": "info"},
     "K_REPLACEMENT_FIRST": {"label": "新表首读起算", "level": "info"},
     "K_ESTIMATE_SKIPPED": {"label": "估抄不作锚点", "level": "info"},
@@ -42,6 +47,8 @@ REASONS: dict[str, dict[str, str]] = {
     "K_UNIT_ASSUMED": {"label": "单位按契约补齐", "level": "info"},
     "K_UNIT_CONVERTED": {"label": "单位已折算", "level": "info"},
     "K_DUPLICATE_IDENTICAL": {"label": "重复行已合并", "level": "info"},
+    "K_METER_ID_ALIASED": {"label": "表号按登记归并", "level": "info"},
+    "K_IDENTITY_MERGED": {"label": "区间含已归并表号", "level": "info"},
 }
 
 

@@ -10,7 +10,7 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
-from ... import config, errors, manifest, reasons
+from ... import config, errors, identity, manifest, reasons
 from ..m1_ingest import service as m1_service
 from ..m2_contract import contract as contract_mod
 from ..m2_contract import service as m2_service
@@ -30,8 +30,10 @@ def run(settings, store, *, sample: str | None = None, mode: str = "full") -> di
     sample_bytes = path.read_bytes()
     meters_bytes = (Path(settings.sample_dir) / config.METERS_FILE).read_bytes()
     prices_bytes = (Path(settings.sample_dir) / config.PRICES_FILE).read_bytes()
+    alias_path = identity.registry_path(settings, name)
+    aliases_bytes = alias_path.read_bytes() if alias_path.is_file() else b""
     digest = manifest.input_digest(name, sample_bytes, meters_bytes, prices_bytes,
-                                   settings.rule_version)
+                                   settings.rule_version, aliases_bytes)
     key = manifest.batch_key(name, digest)
 
     if mode != "force":
@@ -75,26 +77,34 @@ def run(settings, store, *, sample: str | None = None, mode: str = "full") -> di
                    "elapsed_ms": _ms(mark),
                    "note": f"{ingested.encoding} · {ingested.segments} 段"})
 
-    # ---- M2 契约 ----
+    # ---- M2 契约（含表计身份） ----
     mark = time.perf_counter()
     try:
         contracts = contract_mod.load(settings)
+        registry = identity.load_registry(settings, name, contracts)
     except errors.MeterbackError as exc:
         raise fail("contract", exc, mark) from exc
-    records, contract_q, _ = m2_service.interpret_rows(ingested.rows, contracts)
+    interpreted = m2_service.interpret_rows(ingested.rows, contracts, registry)
+    records, contract_q = interpreted.records, interpreted.quarantine
+    merged_count = sum(1 for item in records if item.get("identity") == "aliased")
     stages.append({"stage": "contract", "in_count": len(ingested.rows),
-                   "out_count": len(records), "quarantine_count": len(contract_q),
+                   "out_count": len(records),
+                   "quarantine_count": len(contract_q),
                    "status": "ok", "elapsed_ms": _ms(mark),
-                   "note": f"{len(contracts)} 只表"})
+                   "note": f"{len(contracts)} 只表 · 归并 {merged_count} 行"
+                           + (f" · 待补 {len(interpreted.pending)} 行"
+                              if interpreted.pending else "")})
 
     # ---- M3 质量 ----
     mark = time.perf_counter()
-    quality = m3_service.evaluate(records, contracts)
+    quality = m3_service.evaluate(records, contracts, interpreted.pending)
     stages.append({"stage": "quality", "in_count": len(records),
                    "out_count": len(quality["valid"]) + len(quality["estimate"]),
                    "quarantine_count": len(quality["quarantine"]), "status": "ok",
                    "elapsed_ms": _ms(mark),
-                   "note": f"估抄 {len(quality['estimate'])}"})
+                   "note": f"估抄 {len(quality['estimate'])}"
+                           + (f" · 待补 {len(quality['pending'])}"
+                              if quality["pending"] else "")})
 
     # ---- M4 还原 ----
     mark = time.perf_counter()
@@ -118,6 +128,7 @@ def run(settings, store, *, sample: str | None = None, mode: str = "full") -> di
     # ---- M6 对账 ----
     mark = time.perf_counter()
     quarantine = ingested.quarantine + contract_q + quality["quarantine"]
+    pending_rows = quality["pending"]
     month_usage = allocated["stats"]["usage_total"]
     bill_total = sum((bill["amount_yuan"] for bill in allocated["bills"]), Decimal("0"))
     component_total = sum(
@@ -132,18 +143,20 @@ def run(settings, store, *, sample: str | None = None, mode: str = "full") -> di
         tou_after=allocated["stats"]["tou_residual_after"],
         tou_adjustments=allocated["stats"]["tou_adjustments"],
         bill_total=bill_total, component_total=component_total,
-        bill_count=len(allocated["bills"]))
+        bill_count=len(allocated["bills"]), pending=len(pending_rows))
     stages.append({"stage": "reconcile", "in_count": len(reconcile["accounts"]),
                    "out_count": sum(1 for a in reconcile["accounts"] if a["balanced"]),
                    "quarantine_count": reconcile["diff_count"], "status": "ok",
                    "elapsed_ms": _ms(mark),
-                   "note": "四账平衡" if reconcile["all_balanced"] else "四账不平"})
+                   "note": ("四账平衡" if reconcile["all_balanced"] else "四账不平")
+                           + (f" · 待补身份 {len(pending_rows)} 行"
+                              if pending_rows else "")})
 
     # ---- M7 导出（文件由 GET 接口按需生成） ----
     mark = time.perf_counter()
     stages.append({"stage": "export", "in_count": len(allocated["allocations"]),
                    "out_count": 4, "quarantine_count": 0, "status": "ok",
-                   "elapsed_ms": _ms(mark), "note": "4 个导出文件"})
+                   "elapsed_ms": _ms(mark), "note": "6 个导出文件 + 发布版"})
 
     finished_at = history.iso(history.now_utc())
     elapsed_ms = _ms(t0)
@@ -153,6 +166,11 @@ def run(settings, store, *, sample: str | None = None, mode: str = "full") -> di
         "estimate": len(quality["estimate"]),
         "quarantine": len(quarantine),
         "blank": ingested.blank_lines,
+        "pending": len(pending_rows),
+        "aliased_readings": merged_count,
+        "aliased_meters": len({item["source_meter_id"] for item in records
+                               if item.get("identity") == "aliased"}),
+        "alias_digest": registry.digest,
         "interval_usage": interval_stats["primary_usage_kwh"],
         "month_usage": month_usage,
         "bill_amount": bill_total.quantize(config.MONEY_QUANT),
@@ -167,35 +185,59 @@ def run(settings, store, *, sample: str | None = None, mode: str = "full") -> di
         "balanced": "是" if reconcile["all_balanced"] else "否",
         "reconcile_json": json.dumps(reconcile, ensure_ascii=False, default=str),
     }
+    manifest_inputs = [
+        {"name": name, "sha256": ingested.digest,
+         "bytes": ingested.byte_len, "encoding": ingested.encoding},
+        {"name": config.METERS_FILE,
+         "sha256": manifest.digest_bytes(meters_bytes),
+         "bytes": len(meters_bytes), "encoding": "utf-8"},
+        {"name": config.PRICES_FILE,
+         "sha256": manifest.digest_bytes(prices_bytes),
+         "bytes": len(prices_bytes), "encoding": "utf-8"},
+    ]
+    if registry.filename:
+        manifest_inputs.append(
+            {"name": registry.filename, "sha256": registry.digest,
+             "bytes": registry.byte_len, "encoding": "utf-8"})
     manifest_json = manifest.build(
         run_id=batch["run_id"], batch_id=batch_id, batch_key_value=key,
         settings=settings, sample=name, digest=digest,
-        inputs=[{"name": name, "sha256": ingested.digest,
-                 "bytes": ingested.byte_len, "encoding": ingested.encoding},
-                {"name": config.METERS_FILE,
-                 "sha256": manifest.digest_bytes(meters_bytes),
-                 "bytes": len(meters_bytes), "encoding": "utf-8"},
-                {"name": config.PRICES_FILE,
-                 "sha256": manifest.digest_bytes(prices_bytes),
-                 "bytes": len(prices_bytes), "encoding": "utf-8"}],
-        params={"sample": name, "mode": mode, "rule_version": settings.rule_version},
+        inputs=manifest_inputs,
+        params={"sample": name, "mode": mode, "rule_version": settings.rule_version,
+                "alias_digest": registry.digest},
         started_at=started_at, finished_at=finished_at, elapsed_ms=elapsed_ms,
         stages=stages, counters=history.counters(
             valid=len(quality["valid"]), estimate=len(quality["estimate"]),
             quarantine=len(quarantine), blank=ingested.blank_lines,
+            pending=len(pending_rows),
             intervals=len(intervals), allocations=len(allocated["allocations"]),
             bills=len(allocated["bills"])),
         reconcile=reconcile)
 
     readings_rows = [{
         "lineno": item["lineno"], "segment": item["segment"],
-        "meter_id": item["meter_id"], "register": item["register"],
+        "meter_id": item["meter_id"], "source_meter_id": item.get("source_meter_id")
+        or item["meter_id"], "identity": item.get("identity", "exact"),
+        "identity_basis": item.get("identity_basis", ""),
+        "register": item["register"],
         "read_at": item["read_at"], "reading_text": item["reading_text"],
         "unit_raw": item["unit_raw"], "reading_norm": item["reading"],
         "unit_norm": item["unit_norm"], "read_type": item["read_type"],
         "status": "estimate" if item["read_type"] == "E" else "valid",
         "code": None, "flags": item.get("flags", []), "note": item.get("note", ""),
     } for item in (quality["valid"] + quality["estimate"])]
+
+    pending_rows_out = m2_service.pending_payload(pending_rows)
+
+    manifest_json["identity"] = {
+        "registry": registry.filename,
+        "registry_digest": registry.digest,
+        "aliases": registry.payload() if registry.filename else [],
+        "merged": identity.merge_summary(readings_rows),
+        "pending": identity.pending_summary(pending_rows_out, contracts),
+        "pending_count": len(pending_rows),
+        "pending_in_totals": False,
+    }
 
     store.save_run(
         batch={**batch, "status": "done", "finished_at": finished_at,
@@ -207,6 +249,7 @@ def run(settings, store, *, sample: str | None = None, mode: str = "full") -> di
             "replaced_by": m.replaced_by, "tariff": m.tariff,
         } for m in contracts.values()],
         readings=readings_rows,
+        pending=pending_rows_out,
         intervals=intervals,
         allocations=allocated["allocations"],
         bills=allocated["bills"],
@@ -236,6 +279,15 @@ def run(settings, store, *, sample: str | None = None, mode: str = "full") -> di
             "bytes": ingested.byte_len,
         },
         "counts": store.count_rows(batch_id),
+        "identity": {
+            "registry": registry.filename,
+            "registry_digest": registry.digest,
+            "aliases": registry.payload() if registry.filename else [],
+            "merged": identity.merge_summary(readings_rows),
+            "pending": identity.pending_summary(pending_rows_out, contracts),
+            "pending_count": len(pending_rows),
+            "pending_in_totals": False,
+        },
     }
 
 
@@ -246,6 +298,10 @@ def retry(settings, store, batch_id: str) -> dict:
 
 def quarantine_rows(store, batch_id: str) -> list[dict]:
     return store.load_quarantine(batch_id)
+
+
+def pending_rows(store, batch_id: str) -> list[dict]:
+    return store.load_pending(batch_id)
 
 
 def reason_label(code: str) -> str:

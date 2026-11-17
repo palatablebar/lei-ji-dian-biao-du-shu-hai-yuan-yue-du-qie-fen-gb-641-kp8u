@@ -12,9 +12,15 @@
 | `readings_header_only.csv` | 只有表头 |
 | `readings_blank.csv` | 表头之后全是空行 |
 | `readings_bad_header.csv` | 表头缺 `register` / `read_at` |
+| `readings_alias.csv` | 终端升级前后 `007` / `7` 同表异号，配 `readings_alias.aliases.csv`（带依据）→ 归并为一条连续序列 |
+| `readings_alias_pending.csv` | 与上一份相同的读数，但没有身份登记表 → `7` 全部停在「待补身份」，不进正式结果 |
+
+`readings_alias.aliases.csv` 是表计身份登记：`7 → 007` 并注明工单依据。没有这份登记表时，
+纯数字表号一律不补零合并。
 
 `meters.csv` 是表计契约：容量、综合倍率、单位、寄存器组合、换表事件（M0004 → M0005）。
 `prices.csv` 是电价：峰 1.05 / 平 0.65 / 谷 0.32 元每 kWh。
 
 样例数值是手工设计的，期望值写死在 `tests/fixtures/expected.py`：8 只表、60 行读数、
-45 有效 + 1 估抄 + 14 隔离，区间 32 段，月度合计 4499.900 kWh，账单 3261.96 元。
+45 有效 + 1 估抄 + 13 隔离 + 1 待补身份，区间 32 段，月度合计 4499.900 kWh，
+账单 3261.96 元。表号升级样例的期望值见 `tests/test_identity_publish.py`。

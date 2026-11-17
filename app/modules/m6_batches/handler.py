@@ -46,6 +46,7 @@ def api_run(payload: dict | None = None, ctx: Ctx = Depends(get_ctx)) -> dict:
         "totals": {key: str(value) for key, value in result["totals"].items()},
         "reconcile": compare.payload(reconcile),
         "counts": result["counts"],
+        "identity": result.get("identity") or {},
     }
 
 

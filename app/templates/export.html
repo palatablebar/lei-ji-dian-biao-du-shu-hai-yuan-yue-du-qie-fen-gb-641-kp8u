@@ -36,6 +36,80 @@
   </table>
 </section>
 
+{% if identity %}
+<section class="panel">
+  <div class="panel-head">
+    <h2 class="panel-title">表计身份口径</h2>
+    <span class="panel-sub mono">
+      已确认归并 {{ identity.merged|length }} 组 · 待补 {{ identity.pending_count or 0 }} 行（未计入正式结果）
+    </span>
+  </div>
+  {% if identity.merged %}
+  <table class="table table-dense">
+    <thead><tr><th>原始表号</th><th>规范表号</th><th>映射依据</th><th>读数行</th><th>涉及月份</th></tr></thead>
+    <tbody>
+      {% for row in identity.merged %}
+      <tr>
+        <td class="mono">{{ row.source_meter_id }}</td>
+        <td class="mono">{{ row.meter_id }}</td>
+        <td class="cell-note">{{ row.basis }}</td>
+        <td class="num mono">{{ row.readings }}</td>
+        <td class="mono">{{ row.months|join('、') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-line">本批次没有已确认归并的表号。</p>
+  {% endif %}
+  {% if identity.pending %}
+  <h3 class="subhead">待补身份 <span class="badge badge-warn">未计入</span></h3>
+  <table class="table table-dense">
+    <thead><tr><th>原始表号</th><th>疑似表号</th><th>来源行数</th><th class="num">参考用量 kWh</th></tr></thead>
+    <tbody>
+      {% for row in identity.pending %}
+      <tr>
+        <td class="mono">{{ row.source_meter_id }}</td>
+        <td class="mono">{{ row.candidates|join('、') }}</td>
+        <td class="num mono">{{ row.readings }}</td>
+        <td class="num mono">{{ row.reference_usage_kwh|kwh }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-head">
+    <h2 class="panel-title">月度发布版本</h2>
+    <span class="panel-sub mono">{{ publications|length }} 个版本 · 只追加不覆盖</span>
+  </div>
+  {% if publications %}
+  <table class="table table-dense">
+    <thead><tr><th>月份</th><th class="num">版本</th><th>状态</th><th>批次</th><th>发布时刻</th><th>下载</th></tr></thead>
+    <tbody>
+      {% for item in publications|reverse %}
+      <tr>
+        <td class="mono">{{ item.month }}</td>
+        <td class="num mono">v{{ item.version }}</td>
+        <td>
+          {% if item.status == 'active' %}<span class="badge badge-ok">生效</span>
+          {% else %}<span class="badge badge-plain">已被替换</span>{% endif %}
+        </td>
+        <td class="mono">{{ item.batch_id }}</td>
+        <td class="mono">{{ item.published_at|localdt }}</td>
+        <td><a class="link" href="/api/export/published.csv?month={{ item.month }}&version={{ item.version }}">v{{ item.version }}</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-line">还没有发布版本。到月度分摊页点「发布月度结果」。</p>
+  {% endif %}
+</section>
+
 <section class="panel">
   <div class="panel-head">
     <h2 class="panel-title">清单字段</h2>

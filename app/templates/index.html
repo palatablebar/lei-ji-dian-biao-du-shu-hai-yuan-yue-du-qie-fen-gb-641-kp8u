@@ -33,6 +33,8 @@
   <div class="kpi"><span class="kpi-label">读数行</span><span class="kpi-value mono">{{ totals.raw_lines }}</span></div>
   <div class="kpi"><span class="kpi-label">有效</span><span class="kpi-value mono">{{ totals.valid }}</span></div>
   <div class="kpi"><span class="kpi-label">隔离</span><span class="kpi-value mono">{{ totals.quarantine }}</span></div>
+  <div class="kpi"><span class="kpi-label">待补身份</span><span class="kpi-value mono">{{ totals.pending or 0 }}</span></div>
+  <div class="kpi"><span class="kpi-label">已归并读数</span><span class="kpi-value mono">{{ totals.aliased_readings or 0 }}</span></div>
   <div class="kpi"><span class="kpi-label">区间用量</span><span class="kpi-value mono">{{ totals.interval_usage|kwh }}</span><span class="kpi-unit">kWh</span></div>
   <div class="kpi"><span class="kpi-label">月度用量</span><span class="kpi-value mono">{{ totals.month_usage|kwh }}</span><span class="kpi-unit">kWh</span></div>
   <div class="kpi"><span class="kpi-label">电费</span><span class="kpi-value mono">{{ totals.bill_amount|yuan }}</span><span class="kpi-unit">元</span></div>

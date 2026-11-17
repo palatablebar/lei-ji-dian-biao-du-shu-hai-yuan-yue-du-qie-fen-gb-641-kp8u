@@ -10,7 +10,9 @@ from decimal import Decimal
 RAW_LINES = 60
 VALID = 45
 ESTIMATE = 1
-QUARANTINE = 14
+# 13 条隔离 + 1 条待补身份（表号 7，无登记依据）
+QUARANTINE = 13
+PENDING = 1
 BLANK = 0
 SEGMENTS = 2
 

@@ -43,10 +43,13 @@ def test_readings_partition_holds(store, batch_id):
     valid = store.load_readings(batch_id, status="valid")
     estimate = store.load_readings(batch_id, status="estimate")
     quarantine = store.load_quarantine(batch_id)
+    pending = store.load_pending(batch_id)
     totals = store.load_totals(batch_id)
-    assert len(valid) + len(estimate) + len(quarantine) == int(totals["raw_lines"])
+    assert len(valid) + len(estimate) + len(quarantine) + len(pending) == \
+        int(totals["raw_lines"])
     assert len(valid) == expected.VALID
     assert len(estimate) == expected.ESTIMATE
+    assert len(pending) == expected.PENDING
 
 
 def test_interval_usage_never_negative(store, batch_id):

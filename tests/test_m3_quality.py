@@ -14,9 +14,9 @@ from fixtures import expected
 def _evaluate(settings):
     ingested = m1_service.ingest(settings, "readings_dirty.csv")
     contracts = contract_mod.load(settings)
-    records, contract_q, _ = m2_service.interpret_rows(ingested.rows, contracts)
-    quality = m3_service.evaluate(records, contracts)
-    return quality, contract_q, ingested
+    interpreted = m2_service.interpret_rows(ingested.rows, contracts)
+    quality = m3_service.evaluate(interpreted.records, contracts, interpreted.pending)
+    return quality, interpreted.quarantine, ingested
 
 
 def test_negative_reading_quarantined(settings):
@@ -49,12 +49,15 @@ def test_duplicate_key_conflict_isolates_both_rows(settings):
 
 
 def test_unknown_meter_and_leading_zero_mismatch(settings):
-    """TRAP-08：契约里是 007，写成 7 就是未知表计。"""
+    """TRAP-08：契约里是 007，写成 7 不会自动补零归并，而是列入待补身份。"""
     quality, contract_q, _ = _evaluate(settings)
     unknown = {item["raw_value"] for item in contract_q
                if item["code"] == "Q_UNKNOWN_METER"}
     assert "M0099" in unknown
-    assert "7" in unknown
+    # 纯数字且像是补零写法的表号不按未知表计隔离，也不擅自归并
+    assert "7" not in unknown
+    assert [row["source_meter_id"] for row in quality["pending"]] == ["7"]
+    assert quality["pending"][0]["candidates"] == ["007"]
 
 
 def test_estimate_row_kept_but_not_anchor(settings):
@@ -86,6 +89,9 @@ def test_quarantine_distribution_counts(settings):
     quality, contract_q, ingested = _evaluate(settings)
     everything = ingested.quarantine + contract_q + quality["quarantine"]
     assert len(everything) == expected.QUARANTINE
+    # 待补身份单列，不混进隔离区原因码分布
+    assert "Q_IDENTITY_PENDING" not in {item["code"] for item in everything}
+    assert len(quality["pending"]) == expected.PENDING
     codes = {item["code"] for item in everything}
     assert codes == expected.QUARANTINE_CODES
     distribution = __import__("app.modules.m3_quality.quarantine",

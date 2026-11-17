@@ -62,7 +62,8 @@ def build_intervals(valid: list[dict], estimates: list[dict],
                             seq=seq, meter=meter, register=register, start=start,
                             end=item["read_at"], prev=Decimal("0"),
                             cur=item["reading"], method="replacement_first",
-                            estimates=estimate_index))
+                            estimates=estimate_index, prev_record=None,
+                            cur_record=item))
                 continue
             delta, method = rollover.delta_for(last["reading"], item["reading"],
                                                meter.capacity)
@@ -70,21 +71,38 @@ def build_intervals(valid: list[dict], estimates: list[dict],
             intervals.append(_make(
                 seq=seq, meter=meter, register=register, start=last["read_at"],
                 end=item["read_at"], prev=last["reading"], cur=item["reading"],
-                method=method, estimates=estimate_index, delta=delta))
+                method=method, estimates=estimate_index, delta=delta,
+                prev_record=last, cur_record=item))
             last = item
     intervals.sort(key=lambda item: (item["meter_id"], item["register"], item["start_at"]))
     return intervals
 
 
+def _sources(*records: dict | None) -> list[str]:
+    """区间两侧读数用到的原始表号（归并后仍可追回 007 / 7）。"""
+    out: list[str] = []
+    for record in records:
+        if record is None:
+            continue
+        raw = record.get("source_meter_id") or record["meter_id"]
+        if raw not in out:
+            out.append(raw)
+    return out
+
+
 def _make(*, seq: int, meter: contract_mod.MeterContract, register: str, start: str,
           end: str, prev: Decimal, cur: Decimal, method: str,
-          estimates: dict[tuple, list[str]], delta: Decimal | None = None) -> dict:
+          estimates: dict[tuple, list[str]], delta: Decimal | None = None,
+          prev_record: dict | None = None, cur_record: dict | None = None) -> dict:
     if delta is None:
         delta = cur - prev
     usage_contract = delta * meter.multiplier
     usage_kwh = units.usage_to_kwh(usage_contract, meter.unit).quantize(
         config.USAGE_QUANT)
     flags = _markers(method)
+    sources = _sources(prev_record, cur_record)
+    if any(source != meter.meter_id for source in sources):
+        flags.append("K_IDENTITY_MERGED")
     for stamp in estimates.get((meter.meter_id, register), []):
         if start < stamp <= end:
             flags.append("K_ESTIMATE_SKIPPED")
@@ -104,6 +122,7 @@ def _make(*, seq: int, meter: contract_mod.MeterContract, register: str, start: 
         "days": _days(start, end),
         "method": method,
         "flags": flags,
+        "source_meter_ids": sources,
     }
 
 

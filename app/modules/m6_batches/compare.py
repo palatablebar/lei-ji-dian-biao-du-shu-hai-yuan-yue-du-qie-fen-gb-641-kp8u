@@ -19,15 +19,18 @@ def _account(key: str, label: str, left, right, unit: str, note: str = "") -> di
 def build(*, raw_lines: int, valid: int, estimate: int, quarantine: int, blank: int,
           interval_usage: Decimal, month_usage: Decimal,
           tou_before: Decimal, tou_after: Decimal, tou_adjustments: int,
-          bill_total: Decimal, component_total: Decimal, bill_count: int) -> dict:
+          bill_total: Decimal, component_total: Decimal, bill_count: int,
+          pending: int = 0) -> dict:
+    quarantine_total = quarantine + pending
     accounts = [
         _account("readings", "读数账", raw_lines,
-                 valid + estimate + quarantine + blank, "行",
-                 f"有效 {valid} + 估抄 {estimate} + 隔离 {quarantine} + 空行 {blank}"),
+                 valid + estimate + quarantine_total + blank, "行",
+                 f"有效 {valid} + 估抄 {estimate} + 隔离 {quarantine} + "
+                 f"待补 {pending} + 空行 {blank}"),
         _account("intervals", "区间账",
                  interval_usage.quantize(config.USAGE_QUANT),
                  month_usage.quantize(config.USAGE_QUANT), "kWh",
-                 "主寄存器区间用量 = 月度分摊用量"),
+                 "主寄存器区间用量 = 月度分摊用量（待补身份不计入）"),
         _account("months", "月度账",
                  tou_after.quantize(config.USAGE_QUANT), Decimal("0"), "kWh",
                  f"闭合前尾差 {tou_before.quantize(config.USAGE_QUANT)}，"
@@ -39,16 +42,18 @@ def build(*, raw_lines: int, valid: int, estimate: int, quarantine: int, blank: 
     ]
     diffs = [item for item in accounts if not item["balanced"]]
     return {"accounts": accounts, "all_balanced": not diffs,
-            "diff_count": len(diffs),
+            "diff_count": len(diffs), "pending_count": pending,
             "checked_at": None}
 
 
 def payload(reconcile: dict | None) -> dict:
     if not reconcile:
-        return {"accounts": [], "all_balanced": None, "diff_count": 0}
+        return {"accounts": [], "all_balanced": None, "diff_count": 0,
+                "pending_count": 0}
     return {
         "all_balanced": reconcile["all_balanced"],
         "diff_count": reconcile["diff_count"],
+        "pending_count": reconcile.get("pending_count", 0),
         "accounts": [{
             "key": item["key"],
             "label": item["label"],

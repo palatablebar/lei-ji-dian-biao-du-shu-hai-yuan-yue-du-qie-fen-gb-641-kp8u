@@ -9,7 +9,10 @@
   </div>
   <div class="actions">
     <button class="btn btn-primary" id="allocate-button" type="button">重算分摊</button>
+    <button class="btn btn-ghost" id="publish-button" type="button"
+            data-batch="{{ batch.batch_id if batch else '' }}">发布月度结果</button>
     <a class="btn btn-ghost" href="/api/export/monthly.csv">月度 CSV</a>
+    <a class="btn btn-ghost" href="/api/export/pending.csv">待补 CSV</a>
   </div>
 </section>
 
@@ -18,6 +21,56 @@
 {% if not groups %}
 <section class="empty"><p class="empty-line">没有分摊结果，先跑一次处理。</p></section>
 {% else %}
+{% if merged or pending %}
+<section class="panel">
+  <div class="panel-head">
+    <h2 class="panel-title">表计身份</h2>
+    <span class="panel-sub mono">
+      已确认归并 {{ merged|length }} 组 · 待补身份 {{ pending|length }} 组（未计入正式结果）
+    </span>
+  </div>
+  {% if merged %}
+  <h3 class="subhead">已确认归并</h3>
+  <div class="table-wrap">
+    <table class="table table-dense" data-sortable>
+      <thead><tr><th>原始表号</th><th>规范表号</th><th>映射依据</th><th>影响读数</th><th>涉及月份</th></tr></thead>
+      <tbody>
+        {% for row in merged %}
+        <tr>
+          <td class="mono">{{ row.source_meter_id }}</td>
+          <td class="mono">{{ row.meter_id }}</td>
+          <td class="cell-note">{{ row.basis }}</td>
+          <td class="num mono">{{ row.readings }}</td>
+          <td class="mono">{{ row.months|join('、') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% if pending %}
+  <h3 class="subhead">待补身份 <span class="badge badge-warn">未计入正式用量与费用</span></h3>
+  <div class="table-wrap">
+    <table class="table table-dense" data-sortable>
+      <thead><tr><th>原始表号</th><th>疑似表号</th><th>来源行数</th><th>涉及月份</th>
+        <th class="num">参考用量 kWh</th><th>说明</th></tr></thead>
+      <tbody>
+        {% for row in pending %}
+        <tr>
+          <td class="mono">{{ row.source_meter_id }}</td>
+          <td class="mono">{{ row.candidates|join('、') }}</td>
+          <td class="num mono">{{ row.readings }}</td>
+          <td class="mono">{{ row.months|join('、') }}</td>
+          <td class="num mono">{{ row.reference_usage_kwh|kwh }}</td>
+          <td class="cell-note">无登记依据；补登记后重跑才会进入正式结果</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
 <section class="kpis" aria-label="月度合计">
   <div class="kpi"><span class="kpi-label">月份</span><span class="kpi-value mono">{{ totals.month_count }}</span></div>
   <div class="kpi"><span class="kpi-label">月度用量</span><span class="kpi-value mono">{{ totals.month_usage|kwh }}</span><span class="kpi-unit">kWh</span></div>
@@ -30,11 +83,15 @@
 <section class="panel">
   <div class="panel-head">
     <h2 class="panel-title mono">{{ group.month }}</h2>
-    <span class="panel-sub mono">合计 {{ group.total|kwh }} kWh</span>
+    <span class="panel-sub mono">
+      合计 {{ group.total|kwh }} kWh
+      · 正式结果（已确认归并计入、待补不计入）
+      {% if group.published_version %}· 已发布 v{{ group.published_version }}{% endif %}
+    </span>
   </div>
   <div class="table-wrap">
     <table class="table table-dense">
-      <thead><tr><th>表号</th><th>寄存器</th><th class="num">用量</th><th class="num">单位</th><th>尾差</th></tr></thead>
+      <thead><tr><th>表号</th><th>寄存器</th><th class="num">用量</th><th class="num">单位</th><th>尾差</th><th>口径</th></tr></thead>
       <tbody>
         {% for row in group.rows %}
         <tr>
@@ -43,10 +100,29 @@
           <td class="num mono">{{ row.usage_kwh|kwh }}</td>
           <td class="num unit">kWh</td>
           <td>{% if row.tou_adjusted %}<span class="badge badge-warn">并入</span>{% endif %}</td>
+          <td class="cell-note">
+            {% set merge = group.merged|selectattr('meter_id', 'equalto', row.meter_id)|first %}
+            {% if merge %}含已确认归并 {{ merge.source_meter_id }}{% else %}正式{% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+  </div>
+  {% if group.pending %}
+  <div class="notice notice-warn" role="note">
+    <strong>待补身份（未计入本表合计）</strong>：
+    {% for source in group.pending.source_meter_ids %}<span class="chip">{{ source }}</span>{% endfor %}
+    参考用量 {{ group.pending.reference_usage_kwh|kwh }} kWh。
+    补登记依据后重跑，才会进入正式用量与费用；本月的已发布版本不受影响。
+  </div>
+  {% endif %}
+  <div class="actions">
+    <button class="btn btn-ghost btn-sm publish-month" type="button"
+            data-month="{{ group.month }}" data-batch="{{ batch.batch_id }}">发布 {{ group.month }}</button>
+    {% if group.published_version %}
+    <a class="btn btn-ghost btn-sm" href="/api/export/published.csv?month={{ group.month }}">下载已发布 v{{ group.published_version }}</a>
+    {% endif %}
   </div>
 </section>
 {% endfor %}

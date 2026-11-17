@@ -1,6 +1,6 @@
 # 深度登记 meterback（累计电表读数还原与月度切分）
 
-- 规模：中型（7 个功能模块 / 6 个应用页 / 77 条测试）
+- 规模：中型（7 个功能模块 / 6 个应用页 / 106 条测试）
 - 核心规则：**区间还原 + 按日权重月度切分**。读数按 `(表号, 寄存器, UTC 时间)` 排序后逐对还原：区间用量 =（本次 − 上次）× 综合倍率，满量容量翻转时补容量，换表处拆成「旧表末段 + 新表首读起算」两段，估抄行不作锚点但给区间打标记；区间用量按覆盖天数切到自然月（`[月初, 下月初)` 半开），余数用最大余额法分到 0.001 kWh，同月「总表 = 峰 + 平 + 谷」的残差并入最大分量。
 - 使用者与工作流：临江供电所抄表班 4 人、辖区 8 只示例表（实际 320 只），月度线损与电费原先靠 Excel 手拉；现在一次处理得到「区间用量 + 月度分摊 + 电费」，每个数字都能追回原始行号与原因码。
 
@@ -9,15 +9,16 @@
 | 模块 | 使用者动作 | 入口 | 核心文件 | 测试 |
 |---|---|---|---|---|
 | M1 读数采信 | 导入样例，看逐行诊断、编码与分段 | POST /api/readings/import、页面 /readings | `app/modules/m1_ingest/service.py` `app/modules/m1_ingest/reader.py` `app/modules/m1_ingest/decode.py` `app/modules/m1_ingest/sniff.py` | `tests/test_m1_ingest.py` |
-| M2 表计契约 | 看容量、倍率、寄存器、单位与电价，试跑一行解析 | GET /api/contract、POST /api/contract/preview | `app/modules/m2_contract/contract.py` `app/modules/m2_contract/coerce.py` `app/modules/m2_contract/units.py` | `tests/test_m2_contract.py` |
+| M2 表计契约 | 看容量、倍率、寄存器、单位与电价，试跑一行解析；登记并核对表计身份依据 | GET /api/contract、POST /api/contract/preview | `app/modules/m2_contract/contract.py` `app/modules/m2_contract/coerce.py` `app/modules/m2_contract/units.py` `app/identity.py` | `tests/test_m2_contract.py` `tests/test_identity_publish.py` |
 | M3 质量隔离 | 看原因码分布与隔离行，导出隔离区 CSV | GET /api/quarantine、GET /api/quarantine.csv | `app/modules/m3_quality/rules.py` `app/modules/m3_quality/quarantine.py` | `tests/test_m3_quality.py` |
 | M4 区间还原 | 重算区间，看翻转、换表、估抄标记 | POST /api/intervals/rebuild、页面 /intervals | `app/modules/m4_intervals/restore.py` `app/modules/m4_intervals/rollover.py` `app/modules/m4_intervals/swaps.py` | `tests/test_m4_intervals.py` |
-| M5 月度切分 | 重算分摊与账单，看每月合计与尾差 | POST /api/months/allocate、页面 /months | `app/modules/m5_months/allocate.py` `app/modules/m5_months/weights.py` `app/modules/m5_months/tou.py` | `tests/test_m5_months.py` |
+| M5 月度切分 | 重算分摊与账单，看每月合计与尾差，看已确认归并/待补身份，按月份发布 | POST /api/months/allocate、页面 /months | `app/modules/m5_months/allocate.py` `app/modules/m5_months/weights.py` `app/modules/m5_months/tou.py` `app/publish.py` | `tests/test_m5_months.py` `tests/test_identity_publish.py` |
 | M6 批次与对账 | 跑全流程、查批次历史、看四账、失败重试 | POST /api/runs、GET /api/batches、GET /api/reconcile、页面 / 与 /batches | `app/modules/m6_batches/service.py` `app/modules/m6_batches/compare.py` `app/modules/m6_batches/history.py` `app/modules/m6_batches/resume.py` | `tests/test_m6_batches.py` |
-| M7 导出 | 导出月度分摊、区间、隔离、读数证据、运行清单 | GET /api/export/monthly.csv、GET /api/export/manifest.json、页面 /export | `app/modules/m7_export/evidence.py` `app/modules/m7_export/csv_out.py` `app/modules/m7_export/manifest_out.py` | `tests/test_m7_export.py` |
+| M7 导出 | 导出月度分摊、待补身份、区间、隔离、读数证据、运行清单、已发布版本 | GET /api/export/monthly.csv、GET /api/export/pending.csv、GET /api/export/manifest.json、页面 /export | `app/modules/m7_export/evidence.py` `app/modules/m7_export/csv_out.py` `app/modules/m7_export/manifest_out.py` | `tests/test_m7_export.py` |
 
 端到端：`tests/test_e2e.py`（脏样例 → 六页 200 → 四账 → 导出，含 4xx 失败输入与幂等重跑）。
 不变量：`tests/test_invariants.py`（区间账 = 月度账、幂等重跑行数不变、月桶划分、账单闭合、读数分区）。
+身份与发布：`tests/test_identity_publish.py`（归并、待补、误并防护、版本化发布、中断保留旧版）。
 
 ## 陷阱登记
 
@@ -29,7 +30,10 @@
 | TRAP-05 | 行尾多一个分隔符、列数与表头不一致 | 静默补空值，或后续列全部错位 | 严格列数校验，整行进隔离区并保留原始行文本 | `app/modules/m1_ingest/service.py` | `tests/test_m1_ingest.py::test_column_count_mismatch_isolated_with_lineno` |
 | TRAP-06 | `1,212.5`、`３，０５０.0` 这类千分位与全角写法 | `Decimal()` 抛异常，或整列变成空值 | NFKC 折半角 + 去千分位 + 去单位后缀，再 Decimal 化 | `app/modules/m2_contract/coerce.py` | `tests/test_m2_contract.py::test_thousands_and_fullwidth_normalized` |
 | TRAP-07 | `-` / `N/A` / `未知` 混在读数里 | 被当成 0 参与区间计算，凭空多一段零 | 哨兵清单集中定义，返回 None；`0` 仍是有效读数 | `app/modules/m2_contract/coerce.py`、`app/config.py` | `tests/test_m2_contract.py::test_sentinel_reading_is_three_state` |
-| TRAP-08 | 表号 `007` 被当成数字 7 | 对不上契约，或换表链断掉 | 全链路按字符串保形，`007` 与 `7` 是两个表号 | `app/modules/m2_contract/contract.py` | `tests/test_m2_contract.py::test_meter_id_leading_zero_preserved`、`tests/test_m3_quality.py::test_unknown_meter_and_leading_zero_mismatch` |
+| TRAP-08 | 表号 `007` 被当成数字 7 | 对不上契约，或换表链断掉 | 全链路按字符串保形，`007` 与 `7` 是两个表号；终端升级造成的同表异号走身份登记（见 TRAP-25） | `app/modules/m2_contract/contract.py`、`app/identity.py` | `tests/test_m2_contract.py::test_meter_id_leading_zero_preserved`、`tests/test_m3_quality.py::test_unknown_meter_and_leading_zero_mismatch` |
+| TRAP-25 | 终端升级后同一块表 `007` 写成 `7`，连续读数被拆成两条序列 | 要么漏算一整段用量，要么把所有纯数字表号补零、把不同表计误并 | 身份登记 `*.aliases.csv` 必须带依据才归并；无依据的补零写法列「待补身份」，不进正式用量与费用；别名本身是独立表计时拒绝归并 | `app/identity.py`、`app/modules/m2_contract/service.py` | `tests/test_identity_publish.py::test_confirmed_alias_merges_into_one_series`、`tests/test_identity_publish.py::test_pending_identity_excluded_from_published_totals`、`tests/test_identity_publish.py::test_alias_to_independent_contract_meter_rejected` |
+| TRAP-26 | 月底发布到一半断电/写库失败 | 新旧版本都缺，或旧版被覆盖后无法回退 | 发布在同一事务里「旧版置 superseded + 新版本追加」，失败整体回滚；版本号只增不减，历史快照永久保留 | `app/publish.py`、`app/store.py` | `tests/test_identity_publish.py::test_publish_interruption_keeps_old_version`、`tests/test_identity_publish.py::test_publish_is_versioned_and_supersedes` |
+| TRAP-27 | 同一批读数重跑/重发 | 用量、费用翻倍，或发布版本虚增 | 批次键含读数 + 契约 + 电价 + **身份登记** + 规则版本；同内容重复发布不产生新版本 | `app/manifest.py`、`app/publish.py` | `tests/test_identity_publish.py::test_rerun_same_input_keeps_totals_and_versions`、`tests/test_identity_publish.py::test_same_readings_republish_does_not_add_version` |
 | TRAP-10 | 0.001 kWh 刻度上累加几十行 | float 累加掉尾差，月度合计差 0.001~0.01 | 全链路 Decimal，量化只在切分与账单两处显式发生 | `app/modules/m5_months/weights.py` | `tests/test_m5_months.py::test_decimal_totals_exact` |
 | TRAP-11 | 同一时刻写成 `2026-01-01T00:00:00+08:00` 与 `2025-12-31T16:00:00Z` | 落进两个时间桶，区间多一段零用量 | 先归一 UTC 再排序，无偏移按 +08:00 处理 | `app/modules/m2_contract/coerce.py` | `tests/test_m2_contract.py::test_timezone_offsets_collapse_to_same_instant` |
 | TRAP-14 | 同一 (表号, 寄存器, 时间) 两条不同读数 | 后写覆盖，前一条消失且不留痕 | 两条都进隔离区，带各自原值与行号，不猜哪条为准 | `app/modules/m3_quality/rules.py` | `tests/test_m3_quality.py::test_duplicate_key_conflict_isolates_both_rows` |
@@ -41,15 +45,16 @@
 
 ## 对账规则
 
-- 读数账：原始数据行 = 有效读数 + 估抄 + 隔离行 + 空行（样例 60 = 45 + 1 + 14 + 0）。
-- 区间账：主寄存器（总表优先）区间用量合计 = 月度分摊用量合计（0.001 kWh，逐位相等）。
+- 读数账：原始数据行 = 有效读数 + 估抄 + 隔离行 + 待补身份 + 空行（样例 60 = 45 + 1 + 13 + 1 + 0）。
+- 区间账：主寄存器（总表优先）区间用量合计 = 月度分摊用量合计（0.001 kWh，逐位相等）；待补身份不进入两侧。
 - 月度账：同月同表「总表 = 峰 + 平 + 谷」，闭合后的残差必须为 0，闭合前的尾差条数单独计数。
 - 账单账：账单金额 = 分项金额之和（分项先截尾再补分），四账在 `/` 与 `/batches` 页、`/api/reconcile`、运行清单里同源显示。
+- 发布口径：只有已完成且四账平衡的批次可发布；发布按月份分版本，正式结果与待补部分在月度页、导出 CSV 分列，待补永不进正式合计。
 
 ## 反例与不变量
 
 - 反例（朴素实现会挂）：`tests/test_m4_intervals.py::test_naive_subtraction_would_drop_rollover`（直接相减得负数，翻转段被丢）、`tests/test_m5_months.py::test_bill_rounding_closed_not_naive`（逐项四舍五入多 1 分）、`tests/test_m1_ingest.py::test_naive_splitlines_would_break_records`（带千分位的单元格被切成两列）。
-- 不变量：`tests/test_invariants.py::test_conservation_intervals_equal_months`（守恒）、`tests/test_invariants.py::test_idempotent_run_keeps_rows`（幂等）、`tests/test_invariants.py::test_month_slices_partition_every_interval`（划分）、`tests/test_invariants.py::test_bill_components_sum_equals_amount`（账单闭合）、`tests/test_invariants.py::test_readings_partition_holds`（分区）。
+- 不变量：`tests/test_invariants.py::test_conservation_intervals_equal_months`（守恒）、`tests/test_invariants.py::test_idempotent_run_keeps_rows`（幂等）、`tests/test_invariants.py::test_month_slices_partition_every_interval`（划分）、`tests/test_invariants.py::test_bill_components_sum_equals_amount`（账单闭合）、`tests/test_invariants.py::test_readings_partition_holds`（分区）、`tests/test_identity_publish.py::test_rerun_same_input_keeps_totals_and_versions`（重跑不新增用量/费用/版本）。
 - 端到端：`tests/test_e2e.py::test_full_pipeline_over_http`。
 
 ## 已知不覆盖
@@ -57,6 +62,9 @@
 - 只支持单表计的单向有功读数；双向表（正/反向分别累计）、需量寄存器、无功寄存器一律按 `Q_BAD_REGISTER` 隔离。
 - 电价固定读 `sample_data/prices.csv`（峰 1.05 / 平 0.65 / 谷 0.32 元每 kWh），没有分时日历、阶梯电价与容量电费。
 - 换表链只支持一段（旧表 → 新表）；链式多次换表能识别但只在最后一段起算，中间段会缺口。
+- 表计身份只支持「登记表里显式给定、带依据的一跳别名」；不支持链式归并，也不做基于读数连续性的自动推断。
+- 待补身份只给参考用量，不进入正式分摊、账单与四账；补登记后需要重跑生成新批次再发布。
+- 发布快照按月份冻结；跨月重算（例如改电价）需要逐月重新发布，不会自动替换已发布月份。
 - 时区按固定 +08:00 处理，不引入 DST；跨时区台区不支持。
 - 并行抄表同一时刻多条读数只按「取值是否一致」判定冲突，没有设备侧时钟偏移校正。
 - 页面只做展示与触发，没有登录与权限；批次历史最多展示 20 条。

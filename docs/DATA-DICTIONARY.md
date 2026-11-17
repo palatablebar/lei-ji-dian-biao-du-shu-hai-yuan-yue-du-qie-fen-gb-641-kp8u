@@ -18,6 +18,42 @@
 
 ## 2 表计契约（meters.csv）
 
+### 2.1 表计身份登记（`<样例名>.aliases.csv`）
+
+采集终端升级后同一块物理表可能从 `007` 写成 `7`。`007` 与 `7` 默认是两个字符串，
+不会互相归并；只有在身份登记里写了**依据**的别名才允许归并。
+
+| 列 | 含义 | 约束 |
+|---|---|---|
+| `alias_id` | 导出件里的原始表号（如 `7`） | 必填；不得等于 `canonical_id` |
+| `canonical_id` | 归属的契约表号（如 `007`） | 必填；必须在 `meters.csv` 里 |
+| `basis` | 登记依据（工单号、迁移记录、生效日期） | 必填，空值整批失败 `E_ALIAS_INVALID` |
+| `source` | 依据来源 | 可空 |
+| `effective_at` | 生效时间；填了之后，早于该时点的读数不按此依据归并，仍留待补 | 可空 |
+
+校验规则（任一不满足 → `E_ALIAS_INVALID`，整批不落数据）：
+
+1. `basis` 为空：拒绝。没有依据的映射就是猜测。
+2. `alias_id` 本身是契约里的独立表计：拒绝，避免把两块不同的表并成一块。
+3. `canonical_id` 本身也是别名（链式 A→B→C）：拒绝，一次登记不许穿透多块表。
+4. 同一 `alias_id` 指向多个目标：拒绝。
+
+登记表按**样例名**定位：`readings_alias.csv` → `readings_alias.aliases.csv`。
+登记表内容进入 `input_digest` 与批次键，改依据即生成新批次，旧批次不被静默改写。
+
+### 2.2 身份判定四种结果
+
+| 判定 | 条件 | 去向 |
+|---|---|---|
+| `exact` | 表号就在契约里 | 正常读数 |
+| `aliased` | 登记表里有带依据的别名 | 归并到规范表号；原表号写 `source_meter_id`，依据写 `identity_basis` |
+| `pending` | 不在契约，但形如某只表号的补零写法，且**无登记依据** | 「待补身份」单列，不进正式用量与费用 |
+| `unknown` | 以上都不是 | `Q_UNKNOWN_METER` 隔离 |
+
+待补行仍然做单行校验（负数、超疑似目标满量），通过后落 `pending` 表，
+原因码 `Q_IDENTITY_PENDING`（warn 级，**不进隔离区原因码分布**）。
+待补行不作单调锚点、不产生区间；只给出「参考用量」供补登记后核对。
+
 | 列 | 含义 | 约束 |
 |---|---|---|
 | `capacity` | 满量（寄存器最大值） | > 0；翻转判定的基准 |
@@ -75,10 +111,22 @@
 
 ## 9 原因码
 
-文件级 `E_*`：`E_EMPTY_FILE`、`E_HEADER_ONLY`、`E_ALL_BLANK`、`E_HEADER_INVALID`、`E_DECODE`、`E_SAMPLE_UNKNOWN`、`E_CONTRACT_INVALID`、`E_BATCH_NOT_FOUND`。
+文件级 `E_*`：`E_EMPTY_FILE`、`E_HEADER_ONLY`、`E_ALL_BLANK`、`E_HEADER_INVALID`、`E_DECODE`、`E_SAMPLE_UNKNOWN`、`E_CONTRACT_INVALID`、`E_ALIAS_INVALID`、`E_BATCH_NOT_FOUND`、`E_PUBLISH_NOT_READY`、`E_PUBLISH_UNBALANCED`、`E_PUBLISH_NOT_FOUND`。
 
-行级 `Q_*`：`Q_COLUMN_COUNT`、`Q_TRUNCATED_ROW`、`Q_MISSING_READING`、`Q_BAD_READING`、`Q_BAD_TIME`、`Q_UNKNOWN_METER`、`Q_BAD_REGISTER`、`Q_BAD_UNIT`、`Q_BAD_READ_TYPE`、`Q_NEGATIVE_READING`、`Q_EXCEEDS_CAPACITY`、`Q_REVERSE_READING`、`Q_DUPLICATE_CONFLICT`、`Q_METER_RETIRED`。
+行级 `Q_*`：`Q_COLUMN_COUNT`、`Q_TRUNCATED_ROW`、`Q_MISSING_READING`、`Q_BAD_READING`、`Q_BAD_TIME`、`Q_UNKNOWN_METER`、`Q_BAD_REGISTER`、`Q_BAD_UNIT`、`Q_BAD_READ_TYPE`、`Q_NEGATIVE_READING`、`Q_EXCEEDS_CAPACITY`、`Q_REVERSE_READING`、`Q_DUPLICATE_CONFLICT`、`Q_METER_RETIRED`、`Q_IDENTITY_PENDING`。
 
-标记 `K_*`：`K_ROLLOVER`、`K_REPLACEMENT_FIRST`、`K_ESTIMATE_SKIPPED`、`K_CHARSET_FALLBACK`、`K_BOM_STRIPPED`、`K_SEGMENT_SPLIT`、`K_TRUNCATED_TAIL`、`K_TOU_ADJUSTED`、`K_BILL_ROUNDED`、`K_UNIT_ASSUMED`、`K_UNIT_CONVERTED`、`K_DUPLICATE_IDENTICAL`。
+标记 `K_*`：`K_ROLLOVER`、`K_REPLACEMENT_FIRST`、`K_ESTIMATE_SKIPPED`、`K_CHARSET_FALLBACK`、`K_BOM_STRIPPED`、`K_SEGMENT_SPLIT`、`K_TRUNCATED_TAIL`、`K_TOU_ADJUSTED`、`K_BILL_ROUNDED`、`K_UNIT_ASSUMED`、`K_UNIT_CONVERTED`、`K_DUPLICATE_IDENTICAL`、`K_METER_ID_ALIASED`、`K_IDENTITY_MERGED`。
+
+## 10 发布与口径
+
+- 发布对象是**月份**：一个月份的「正式结果」= 已确认归并后的分摊与账单。
+- 只有 `status=done` 且四账平衡的批次可发布；否则 `409 E_PUBLISH_NOT_READY` /
+  `E_PUBLISH_UNBALANCED`，旧版本保持 active。
+- 版本号单调递增；发布在同一事务里「旧版置 superseded + 新版本插入」，
+  失败整体回滚。历史版本内容（含原始表号、映射依据、待补参考量）永久保留。
+- 同一批次、同一内容重复发布不产生新版本（`idempotent=true`）。
+- 发布版 CSV 的「口径」列：`正式` / `待补（未计入）`；归并信息在「归并原表号」「映射依据」两列。
+- 待补行的「用量kWh」「金额元」永远为空，参考量只写在独立的「参考用量kWh」列。
+  对正式用量/金额列求和，不会把没有登记依据的量算进去。
 
 唯一来源：`app/reasons.py`；页面与导出的原因文案都从它取。

@@ -81,8 +81,10 @@ def page_readings(request: Request, batch_id: str | None = None,
         readings = ctx.store.load_readings(batch["batch_id"])
         quarantine = ctx.store.load_quarantine(batch["batch_id"])
         stages = ctx.store.load_stages(batch["batch_id"])
+    pending = ctx.store.load_pending(batch["batch_id"]) if batch is not None else []
     return render(request, "readings.html", page="readings", page_title="读数诊断",
                   batch=batch, readings=readings, quarantine=quarantine,
                   stages=stages, samples=service.available_samples(ctx.settings),
                   distribution=quarantine_mod.distribution(quarantine),
+                  pending=pending,
                   qsummary=quarantine_mod.summary(quarantine))

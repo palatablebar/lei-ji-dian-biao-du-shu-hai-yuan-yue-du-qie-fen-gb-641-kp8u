@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CHINA_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
 UTC = dt.timezone.utc
 
-RULE_VERSION = "meterback/1.0.0"
+RULE_VERSION = "meterback/1.1.0"
 
 USAGE_QUANT = Decimal("0.001")
 MONEY_QUANT = Decimal("0.01")
@@ -80,10 +80,14 @@ SAMPLES = {
     "readings_header_only.csv": "仅表头",
     "readings_blank.csv": "全空行",
     "readings_bad_header.csv": "表头缺列",
+    "readings_alias.csv": "表号升级已确认归并",
+    "readings_alias_pending.csv": "表号升级待补登记（同样读数，无依据）",
 }
 DEFAULT_SAMPLE = "readings_dirty.csv"
 METERS_FILE = "meters.csv"
 PRICES_FILE = "prices.csv"
+# 表计身份登记：只有登记了依据的别名才允许归并，普通补零不猜
+ALIASES_FILE = "meter_aliases.csv"
 
 # 单一制电价兜底（prices.csv 缺失时）
 DEFAULT_PRICES = {"TOTAL": Decimal("0.65"), "PEAK": Decimal("1.05"),

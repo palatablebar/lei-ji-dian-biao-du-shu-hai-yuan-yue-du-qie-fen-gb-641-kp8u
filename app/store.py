@@ -39,14 +39,17 @@ CREATE TABLE IF NOT EXISTS readings (
     meter_id TEXT NOT NULL, register TEXT NOT NULL, read_at TEXT NOT NULL,
     reading_text TEXT NOT NULL, unit_raw TEXT NOT NULL, reading_norm TEXT,
     unit_norm TEXT, read_type TEXT NOT NULL, status TEXT NOT NULL,
-    code TEXT, flags_json TEXT NOT NULL DEFAULT '[]', note TEXT NOT NULL DEFAULT ''
+    code TEXT, flags_json TEXT NOT NULL DEFAULT '[]', note TEXT NOT NULL DEFAULT '',
+    source_meter_id TEXT NOT NULL DEFAULT '', identity TEXT NOT NULL DEFAULT 'exact',
+    identity_basis TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS intervals (
     batch_id TEXT NOT NULL, interval_id TEXT NOT NULL, meter_id TEXT NOT NULL,
     register TEXT NOT NULL, start_at TEXT NOT NULL, end_at TEXT NOT NULL,
     prev_reading TEXT NOT NULL, cur_reading TEXT NOT NULL, delta TEXT NOT NULL,
     multiplier TEXT NOT NULL, unit TEXT NOT NULL, usage_kwh TEXT NOT NULL,
-    days TEXT NOT NULL, method TEXT NOT NULL, flags_json TEXT NOT NULL DEFAULT '[]'
+    days TEXT NOT NULL, method TEXT NOT NULL, flags_json TEXT NOT NULL DEFAULT '[]',
+    source_meter_ids_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS allocations (
     batch_id TEXT NOT NULL, month TEXT NOT NULL, meter_id TEXT NOT NULL,
@@ -63,6 +66,14 @@ CREATE TABLE IF NOT EXISTS quarantine (
     code TEXT NOT NULL, stage TEXT NOT NULL, level TEXT NOT NULL,
     field TEXT, raw_value TEXT, meter_id TEXT, detail TEXT
 );
+CREATE TABLE IF NOT EXISTS pending (
+    batch_id TEXT NOT NULL, lineno INTEGER NOT NULL, segment INTEGER NOT NULL,
+    source_meter_id TEXT NOT NULL, candidate_id TEXT NOT NULL,
+    candidates_json TEXT NOT NULL DEFAULT '[]', register TEXT NOT NULL,
+    read_at TEXT NOT NULL, reading_text TEXT NOT NULL, reading_norm TEXT,
+    unit_raw TEXT NOT NULL DEFAULT '', unit_norm TEXT, read_type TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS stages (
     batch_id TEXT NOT NULL, stage TEXT NOT NULL, in_count INTEGER NOT NULL,
     out_count INTEGER NOT NULL, quarantine_count INTEGER NOT NULL,
@@ -74,6 +85,19 @@ CREATE TABLE IF NOT EXISTS totals (
 CREATE TABLE IF NOT EXISTS manifests (
     batch_id TEXT PRIMARY KEY, json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS publications (
+    month TEXT NOT NULL, version INTEGER NOT NULL,
+    status TEXT NOT NULL,             -- active / superseded
+    batch_id TEXT NOT NULL, run_id TEXT NOT NULL,
+    input_digest TEXT NOT NULL, alias_digest TEXT NOT NULL,
+    rule_version TEXT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    published_at TEXT NOT NULL, superseded_at TEXT,
+    snapshot_json TEXT NOT NULL,
+    PRIMARY KEY (month, version)
+);
+CREATE INDEX IF NOT EXISTS idx_publications_month_status
+    ON publications(month, status);
 """
 
 
@@ -91,6 +115,21 @@ class Store:
                        conn.execute("PRAGMA table_info(batches)").fetchall()}
             if "updated_at" not in columns:
                 conn.execute("ALTER TABLE batches ADD COLUMN updated_at TEXT")
+            # 旧库补列：身份证据与区间来源都要求可空默认，不重算历史批次
+            for table, column, ddl in (
+                    ("readings", "source_meter_id",
+                     "ALTER TABLE readings ADD COLUMN source_meter_id TEXT NOT NULL DEFAULT ''"),
+                    ("readings", "identity",
+                     "ALTER TABLE readings ADD COLUMN identity TEXT NOT NULL DEFAULT 'exact'"),
+                    ("readings", "identity_basis",
+                     "ALTER TABLE readings ADD COLUMN identity_basis TEXT NOT NULL DEFAULT ''"),
+                    ("intervals", "source_meter_ids_json",
+                     "ALTER TABLE intervals ADD COLUMN source_meter_ids_json "
+                     "TEXT NOT NULL DEFAULT '[]'")):
+                existing = {row["name"] for row in
+                            conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if column not in existing:
+                    conn.execute(ddl)
 
     @contextmanager
     def connect(self):
@@ -179,11 +218,11 @@ class Store:
     def save_run(self, *, batch: dict, meters: list[dict], readings: list[dict],
                  intervals: list[dict], allocations: list[dict], bills: list[dict],
                  quarantine: list[dict], stages: list[dict], totals: dict,
-                 manifest_json: dict) -> None:
+                 manifest_json: dict, pending: list[dict] | None = None) -> None:
         b = batch["batch_id"]
         with self.connect() as conn:
             for table in ("meters", "readings", "intervals", "allocations", "bills",
-                          "quarantine", "stages", "totals"):
+                          "quarantine", "pending", "stages", "totals"):
                 conn.execute(f"DELETE FROM {table} WHERE batch_id=?", (b,))
             for m in meters:
                 conn.execute(
@@ -197,25 +236,30 @@ class Store:
                 conn.execute(
                     """INSERT INTO readings (batch_id,lineno,segment,meter_id,register,
                         read_at,reading_text,unit_raw,reading_norm,unit_norm,read_type,
-                        status,code,flags_json,note)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        status,code,flags_json,note,source_meter_id,identity,
+                        identity_basis)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (b, r["lineno"], r["segment"], r["meter_id"], r["register"],
                      r["read_at"], r["reading_text"], r["unit_raw"],
                      None if r.get("reading_norm") is None else str(r["reading_norm"]),
                      r.get("unit_norm"), r["read_type"], r["status"], r.get("code"),
                      json.dumps(r.get("flags", []), ensure_ascii=False),
-                     r.get("note", "")))
+                     r.get("note", ""),
+                     r.get("source_meter_id") or r["meter_id"],
+                     r.get("identity") or "exact",
+                     r.get("identity_basis") or ""))
             for i in intervals:
                 conn.execute(
                     """INSERT INTO intervals (batch_id,interval_id,meter_id,register,
                         start_at,end_at,prev_reading,cur_reading,delta,multiplier,unit,
-                        usage_kwh,days,method,flags_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        usage_kwh,days,method,flags_json,source_meter_ids_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (b, i["interval_id"], i["meter_id"], i["register"], i["start_at"],
                      i["end_at"], str(i["prev_reading"]), str(i["cur_reading"]),
                      str(i["delta"]), str(i["multiplier"]), i["unit"],
                      str(i["usage_kwh"]), str(i["days"]), i["method"],
-                     json.dumps(i.get("flags", []), ensure_ascii=False)))
+                     json.dumps(i.get("flags", []), ensure_ascii=False),
+                     json.dumps(i.get("source_meter_ids", []), ensure_ascii=False)))
             for a in allocations:
                 conn.execute(
                     """INSERT INTO allocations (batch_id,month,meter_id,register,usage_kwh,
@@ -239,6 +283,19 @@ class Store:
                     (b, q["lineno"], q.get("segment", 1), q["code"], q["stage"],
                      q["level"], q.get("field"), q.get("raw_value"),
                      q.get("meter_id"), q.get("detail")))
+            for row in pending or []:
+                conn.execute(
+                    """INSERT INTO pending (batch_id,lineno,segment,source_meter_id,
+                        candidate_id,candidates_json,register,read_at,reading_text,
+                        reading_norm,unit_raw,unit_norm,read_type,note,detail)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (b, row["lineno"], row.get("segment", 1), row["source_meter_id"],
+                     row["candidate_id"],
+                     json.dumps(row.get("candidates", []), ensure_ascii=False),
+                     row["register"], row["read_at"], row["reading_text"],
+                     str(row["reading_norm"]), row.get("unit_raw") or "",
+                     row.get("unit_norm"), row["read_type"], row.get("note", ""),
+                     row.get("detail", "")))
             for s in stages:
                 conn.execute(
                     """INSERT INTO stages (batch_id,stage,in_count,out_count,
@@ -287,6 +344,19 @@ class Store:
         for r in rows:
             r["flags"] = json.loads(r.pop("flags_json") or "[]")
             r["reading_norm"] = _dec(r["reading_norm"])
+            r["raw_meter_id"] = r.get("source_meter_id") or r["meter_id"]
+        return rows
+
+    def load_pending(self, batch_id: str) -> list[dict]:
+        """待补身份的行：不是有效读数，也不在隔离区，单列一区。"""
+        rows = self._all(
+            "SELECT * FROM pending WHERE batch_id=? ORDER BY source_meter_id, read_at",
+            (batch_id,))
+        for row in rows:
+            row["candidates"] = json.loads(row.pop("candidates_json") or "[]")
+            row["reading_norm"] = _dec(row["reading_norm"])
+            row["meter_id"] = row["source_meter_id"]
+            row["code"] = "Q_IDENTITY_PENDING"
         return rows
 
     def load_intervals(self, batch_id: str) -> list[dict]:
@@ -295,6 +365,7 @@ class Store:
             (batch_id,))
         for r in rows:
             r["flags"] = json.loads(r.pop("flags_json") or "[]")
+            r["source_meter_ids"] = json.loads(r.pop("source_meter_ids_json") or "[]")
             for key in ("prev_reading", "cur_reading", "delta", "multiplier", "usage_kwh",
                         "days"):
                 r[key] = _dec(r[key])
@@ -344,9 +415,84 @@ class Store:
     def count_rows(self, batch_id: str) -> dict:
         tables = ("meters", "readings", "intervals", "allocations", "bills", "quarantine")
         with self.connect() as conn:
-            return {t: conn.execute(
+            counts = {t: conn.execute(
                 f"SELECT COUNT(*) AS n FROM {t} WHERE batch_id=?", (batch_id,)
             ).fetchone()["n"] for t in tables}
+            counts["pending"] = conn.execute(
+                "SELECT COUNT(*) AS n FROM pending WHERE batch_id=?",
+                (batch_id,)).fetchone()["n"]
+        return counts
+
+    # ---------- 发布快照（只追加，不覆盖） ----------
+    def list_publications(self, month: str | None = None) -> list[dict]:
+        sql = ("SELECT month,version,status,batch_id,run_id,input_digest,alias_digest,"
+               "rule_version,snapshot_hash,published_at,superseded_at "
+               "FROM publications")
+        args: tuple = ()
+        if month:
+            sql += " WHERE month=?"
+            args = (month,)
+        sql += " ORDER BY month, version"
+        return self._all(sql, args)
+
+    def active_publication(self, month: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM publications WHERE month=? AND status='active' "
+                "ORDER BY version DESC LIMIT 1", (month,)).fetchone()
+        return dict(row) if row else None
+
+    def publication(self, month: str, version: int) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM publications WHERE month=? AND version=?",
+                (month, version)).fetchone()
+        return dict(row) if row else None
+
+    def latest_version(self, month: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(version) AS v FROM publications WHERE month=?",
+                (month,)).fetchone()
+        return int(row["v"] or 0)
+
+    def publish_snapshot(self, snapshot: dict) -> dict:
+        """发布 = 同一事务里「旧版置 superseded + 新版本追加」。
+
+        任一步失败整体回滚，旧版仍是唯一 active 版本——发布中断不丢旧版。
+        版本号只增不减，历史快照内容永远保留（原始表号与映射依据都在快照里）。
+        """
+        month = snapshot["month"]
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM publications WHERE month=? AND version=?",
+                (month, snapshot["version"])).fetchone()
+            if existing is not None:
+                # 历史版本不可覆盖：同一版本号第二次写入直接失败并回滚
+                raise ValueError(
+                    f"发布版本 {month} v{snapshot['version']} 已存在，历史版本不可覆盖")
+            conn.execute(
+                "UPDATE publications SET status='superseded', superseded_at=? "
+                "WHERE month=? AND status='active'",
+                (snapshot["published_at"], month))
+            conn.execute(
+                """INSERT INTO publications (month,version,status,batch_id,run_id,
+                        input_digest,alias_digest,rule_version,snapshot_hash,
+                        published_at,superseded_at,snapshot_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (month, snapshot["version"], "active", snapshot["batch_id"],
+                 snapshot["run_id"], snapshot["input_digest"],
+                 snapshot["alias_digest"], snapshot["rule_version"],
+                 snapshot["snapshot_hash"], snapshot["published_at"], None,
+                 json.dumps(snapshot, ensure_ascii=False, default=str)))
+        return snapshot
+
+    def load_publication_snapshot(self, month: str, version: int) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT snapshot_json FROM publications WHERE month=? AND version=?",
+                (month, version)).fetchone()
+        return json.loads(row["snapshot_json"]) if row else None
 
     def _all(self, sql: str, args: tuple) -> list[dict]:
         with self.connect() as conn:

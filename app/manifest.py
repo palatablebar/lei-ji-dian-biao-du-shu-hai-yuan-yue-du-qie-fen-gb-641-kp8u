@@ -29,13 +29,16 @@ def digest_parts(parts: list[str]) -> str:
 
 
 def input_digest(sample_name: str, sample_bytes: bytes, meters_bytes: bytes,
-                 prices_bytes: bytes, rule_version: str) -> str:
+                 prices_bytes: bytes, rule_version: str,
+                 aliases_bytes: bytes = b"") -> str:
+    """身份登记也是输入：登记表一变，批次键就变，旧批次不会被静默改写。"""
     return digest_parts([
         rule_version,
         sample_name,
         digest_bytes(sample_bytes),
         digest_bytes(meters_bytes),
         digest_bytes(prices_bytes),
+        digest_bytes(aliases_bytes),
     ])
 
 

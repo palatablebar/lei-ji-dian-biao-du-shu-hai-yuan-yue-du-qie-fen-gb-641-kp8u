@@ -88,6 +88,22 @@ async function recompute(button, url, label) {
   }
 }
 
+async function publishResult(button, body, label) {
+  if (state.busy) return;
+  lock(button, label);
+  try {
+    const payload = await postJSON("/api/publications", body);
+    const versions = (payload.published || [])
+      .map((item) => item.month + " v" + item.version).join("、");
+    notice("已发布 " + versions);
+    window.setTimeout(() => window.location.reload(), 500);
+  } catch (error) {
+    notice(String(error.message || error), true);
+  } finally {
+    unlock(button);
+  }
+}
+
 function bind() {
   const runButton = el("run-button");
   if (runButton) {
@@ -112,6 +128,16 @@ function bind() {
     allocate.addEventListener("click",
       () => recompute(allocate, "/api/months/allocate", "重算中"));
   }
+  const publish = el("publish-button");
+  if (publish) {
+    publish.addEventListener("click", () => publishResult(
+      publish, { batch_id: publish.dataset.batch }, "发布中"));
+  }
+  document.querySelectorAll(".publish-month").forEach((button) => {
+    button.addEventListener("click", () => publishResult(
+      button, { batch_id: button.dataset.batch, month: button.dataset.month },
+      "发布中"));
+  });
   document.querySelectorAll("[data-print]").forEach((button) => {
     button.addEventListener("click", () => window.print());
   });

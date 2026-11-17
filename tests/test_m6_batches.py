@@ -28,7 +28,8 @@ def test_rerun_keeps_row_counts(settings, store, batch_id):
     service.run(settings, store, sample="readings_dirty.csv")
     assert store.count_rows(batch_id) == before
     assert before == {"meters": 8, "readings": 46, "intervals": 32,
-                      "allocations": 40, "bills": 16, "quarantine": 14}
+                      "allocations": 40, "bills": 16, "quarantine": 13,
+                      "pending": 1}
 
 
 def test_four_accounts_balanced(run_result):
@@ -45,10 +46,12 @@ def test_four_accounts_balanced(run_result):
 def test_readings_account_identity(run_result):
     totals = run_result["totals"]
     assert totals["raw_lines"] == (totals["valid"] + totals["estimate"]
-                                   + totals["quarantine"] + totals["blank"])
+                                   + totals["quarantine"] + totals["pending"]
+                                   + totals["blank"])
     assert (totals["valid"], totals["estimate"], totals["quarantine"],
-            totals["blank"]) == (expected.VALID, expected.ESTIMATE,
-                                 expected.QUARANTINE, expected.BLANK)
+            totals["pending"], totals["blank"]) == (
+                expected.VALID, expected.ESTIMATE, expected.QUARANTINE,
+                expected.PENDING, expected.BLANK)
 
 
 def test_batch_key_changes_with_sample(settings, store):
